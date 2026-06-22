@@ -15,6 +15,8 @@ smart_qa/tasks/
 *.xlsx
 *.db
 *.db-journal
+# 防御性:任何 .wps(内部私有文档格式;本仓库无合法 .wps 代码)
+*.wps
 
 # ============================================================
 # 配置 / 密钥
@@ -31,6 +33,13 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+# 指纹 golden 目录(由 capture_fingerprint 从真实 Excel 派生·含单元格数值)
+smart_qa/tests/golden/
+# pytest-html / 类似的测试报告 artifact
+smart_qa/tests/_last_report.json
+smart_qa/tests/report.html
+# golden_cases.py(测试用例 expected 值 = 三峡财务实际值·专有数据)
+smart_qa/tests/golden_cases.py
 
 # ============================================================
 # 可能含数据的内部文档
@@ -46,7 +55,7 @@ smart_qa/docs/核心疑问汇编.md
 # 会话 / 临时文件
 # ============================================================
 # Claude 会话续接日志(本次)
-2026-06-18-*-this-session-is-continued-from-a-previous-*.txt
+*-this-session-is-being-continued-from-a-previous-*.txt
 # 临时勘察/脚本
 _explore_*.py
 _smoke_*.py
