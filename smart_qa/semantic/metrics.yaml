@@ -1,0 +1,157 @@
+# ====================================================================
+# 指标字典 metrics.yaml
+# 每个指标定义：定位规则、同义词、单位、默认实体、是否分类节点
+# 这是 LLM 意图解析与确定性引擎之间的"契约"
+# ====================================================================
+
+# --------- 财务类指标（单位：亿元）---------
+利润总额:
+  synonyms: [利润, 总利润, 净利润近似]
+  locator: { sheet: 财务数据, row: 利润总额 }
+  unit: 亿元
+  default_entity: 三峡国际
+  note: 含汇兑影响；如需剔汇兑见"剔除汇兑影响的利润总额"
+
+剔除汇兑影响的利润总额:
+  synonyms: [剔除汇兑的利润, 经营利润近似]
+  locator: { sheet: 财务数据, row: 剔除汇兑影响的利润总额 }
+  unit: 亿元
+
+汇兑净损失:
+  synonyms: [汇兑损益, 汇兑, 汇兑损失, 汇兑净收益]
+  locator: { sheet: 财务数据, row: 汇兑净损失（净收益以“-”号填列） }
+  unit: 亿元
+  sign_convention: 净收益以负号填列
+
+营业收入:
+  synonyms: [收入]
+  locator: { sheet: 财务数据, row: 营业收入 }
+  unit: 亿元
+
+总资产:
+  synonyms: [资产]
+  locator: { sheet: 财务数据, row: 总资产 }
+  unit: 亿元
+
+总负债:
+  synonyms: [负债]
+  locator: { sheet: 财务数据, row: 总负债 }
+  unit: 亿元
+
+EBITDA:
+  locator: { sheet: 财务数据, row: EBITDA }
+  unit: 亿元
+
+投资:
+  synonyms: [对外投资]
+  locator: { sheet: 财务数据, row: 投资 }
+  unit: 亿元
+
+投资收益:
+  locator: { sheet: 财务数据, row: 投资收益 }
+  unit: 亿元
+
+累计注资:
+  locator: { sheet: 财务数据, row: 累计注资（集团和小股东） }
+  unit: 亿元
+
+净资产:
+  synonyms: [所有者权益, 所有者权益+分红]
+  locator: { sheet: 财务数据, row: 所有者权益+分红（集团和小股东）（净资产） }
+  unit: 亿元
+
+向集团分红:
+  synonyms: [集团分红, 给集团分红]
+  locator: { sheet: 财务数据, row: 向集团分红 }
+  unit: 亿元
+
+向小股东分红:
+  locator: { sheet: 财务数据, row: 向小股东分红 }
+  unit: 亿元
+
+资产负债率:
+  synonyms: [负债率]
+  locator: { sheet: 财务数据, row: 资产负债率 }
+  unit: 比率
+  display: 百分比
+
+三峡国际净资产收益率:
+  synonyms: [三峡国际ROE, ROE]
+  locator: { sheet: 财务数据, row: 三峡国际净资产收益率(%) }
+  unit: 百分比
+
+集团净资产收益率:
+  synonyms: [集团ROE]
+  locator: { sheet: 财务数据, row: 集团净资产收益率(%) }
+  unit: 百分比
+
+# --------- 装机类指标（单位：万千瓦）---------
+总装机:
+  synonyms: [装机合计, 合计装机, 装机总量]
+  locator: { sheet: 装机, row: 合计 }
+  unit: 万千瓦
+
+可控装机:
+  synonyms: [控股装机]
+  locator: { sheet: 装机, row: 可控装机 }
+  unit: 万千瓦
+
+权益装机:
+  locator: { sheet: 装机, row: 权益装机 }
+  unit: 万千瓦
+
+# --------- 发电量类指标（左表年度：亿千瓦时）---------
+发电量:
+  synonyms: [发电, 总发电量]
+  locator: { sheet: 发电量, table: 年度, row: 发电量合计 }
+  unit: 亿千瓦时
+
+水电发电量:
+  parent: 发电量
+  taxonomy_node: 水电
+  locator: { sheet: 发电量, table: 年度 }
+  unit: 亿千瓦时
+  aggregation: sum_by_方式   # 按发电方式=水电 聚合所有项目
+
+风电发电量:
+  parent: 发电量
+  taxonomy_node: 风电         # 展开 = 陆上风电 ∪ 海上风电
+  locator: { sheet: 发电量, table: 年度 }
+  unit: 亿千瓦时
+  aggregation: sum_by_方式
+
+光伏发电量:
+  parent: 发电量
+  taxonomy_node: 光伏
+  locator: { sheet: 发电量, table: 年度 }
+  unit: 亿千瓦时
+  aggregation: sum_by_方式
+
+# 区域发电量(按区域小计行;row 用 gen_subtotals 的 emit_key,不是 Excel 原标签)
+巴西发电量:
+  locator: { sheet: 发电量, table: 年度, row: 巴西 }
+  unit: 亿千瓦时
+  is_subtotal: true
+
+南亚发电量:
+  locator: { sheet: 发电量, table: 年度, row: 南亚 }
+  unit: 亿千瓦时
+  is_subtotal: true
+
+欧洲发电量:
+  locator: { sheet: 发电量, table: 年度, row: 欧洲 }
+  unit: 亿千瓦时
+  is_subtotal: true
+
+拉美发电量:
+  locator: { sheet: 发电量, table: 年度, row: 拉美 }
+  unit: 亿千瓦时
+  is_subtotal: true
+
+# --------- 派生指标（需运算，非直接取数）---------
+利润增长率:
+  derived: true
+  base_metric: 利润总额
+  operation: cagr
+  unit: 百分比
+  note: 默认 base=利润总额；近三年期初取窗口前一年底

@@ -1,0 +1,10 @@
+pyyaml>=6.0
+pandas>=2.0
+xlrd>=2.0         # 仅读 .xls(.xlsx 由 openpyxl 处理)
+openpyxl>=3.0     # 读 .xlsx
+streamlit>=1.30   # Web 工作台 UI(app.py + pages/)
+pytest>=7.0
+
+# LLM 走统一 llm_client(OpenAI 兼容,urllib 标准库),无需 anthropic/openai SDK
+# 可选:python-dotenv(从 .env 读配置;未装则只读真实环境变量)
+# python-dotenv>=1.0

@@ -1,0 +1,78 @@
+# 三峡国际经营数据库 · Excel schema(手写验证版)
+#
+# 路径相对本文件: schemas/ 在 smart_qa/schemas/, 工作簿在 excel_analysis/测试数据.xls
+# 本 schema 仅描述结构,不出现任何数值。
+
+path: ../../测试数据.xls
+engine: auto          # .xls → xlrd, .xlsx → openpyxl
+version: "1"
+
+sheets:
+
+  # ============================================================ 财务数据
+  - name: 财务数据
+    tables:
+      - name: 财务主表
+        header_row: 2          # 0-indexed 第 3 行
+        first_data_row: 3
+        label_col_idx: 1       # 第 2 列 = "项目"
+        target: row_map
+        data_col_start: 2      # 数据从 idx 2 开始,到最后一个非空 header
+        skip_labels: ["备注"]
+        duplicate_label_policy: warn
+        # 数据列 key 全部从 header 派生("2018年"/"2026-01"),无需硬编码年份
+
+  # ============================================================ 装机
+  - name: 装机
+    tables:
+      - name: 装机主表
+        header_row: 2
+        first_data_row: 4      # 跳过 (一)/(二) 标题行
+        label_col_idx: 1
+        target: row_map        # flat 索引器: 不做层级继承/小计检测,语义层处理
+        data_col_start: 5      # 跳过 idx 0..4(序号/项目/持股比例/一带一路/空)
+        duplicate_label_policy: warn
+
+  # ============================================================ 发电量
+  - name: 发电量
+    tables:
+      # ---- Table A: 明细项目 → grid.gen_projects ----
+      - name: 年度明细
+        header_row: 3
+        first_data_row: 4
+        target: gen_detail
+        detail_marker_col_idx: 4   # 第 5 列 = "项目名称",非空 = 明细行
+        detail_classifier_cols:
+          name: 4
+          方式: 2
+          区域: 3
+        data_col_start: 5          # 年度列 idx 5..11 (2019-2025)
+        data_col_end: 12           # EXCLUSIVE: 避免越界到右侧月度表
+        subtotal_rules: []         # 明细表忽略小计规则
+
+      # ---- Table B: 区域/合计小计 → grid.gen_subtotals ----
+      - name: 年度小计
+        header_row: 3
+        first_data_row: 4
+        target: gen_subtotals
+        label_col_idx: 1           # 序号/小计标签所在列(做 match_substring)
+        detail_marker_col_idx: 4   # col 4 非空 = 明细,跳过;空 = 小计候选
+        data_col_start: 5
+        data_col_end: 12
+        # first-wins: 顺序很重要
+        subtotal_rules:
+          - { match_substring: "发电量合计", emit_key: "合计" }
+          - { match_substring: "合计",       emit_key: "合计" }
+          - { match_substring: "（一）巴西", emit_key: "巴西" }
+          - { match_substring: "（二）南亚", emit_key: "南亚" }
+          - { match_substring: "（三）欧洲", emit_key: "欧洲" }
+          - { match_substring: "（四）拉美", emit_key: "拉美" }
+
+      # ---- Table C: 月度表(占位,当前不加载) ----
+      - name: 月度
+        header_row: 3
+        first_data_row: 4
+        target: gen_detail
+        enabled: false
+        data_col_start: 13
+        subtotal_rules: []
