@@ -83,28 +83,33 @@ def trace_question(grid, question: str, use_llm: bool = False, ans: dict | None 
     }
 
 
+# sheet 名 → 展示用来源标签(原散落在 if/elif 各分支的 "grid.fin" 等字符串)
+_SOURCE_LABEL = {"财务数据": "grid.fin", "装机": "grid.cap", "发电量": "grid.gen_subtotals"}
+
+
 def _grid_slice_for_metric(grid, metric: str | None, info: dict) -> dict:
-    """按 metric locator 从 grid 取相关行切片(展示用)。"""
+    """按 metric locator 从 grid 取相关行切片(展示用)。
+
+    行解析走 Grid.resolve_locator(loader 侧接缝),统一 fin/cap/gen_subtotals 定位。
+    """
     if not metric or not info:
         return {"note": "无指标"}
     loc = info.get("locator") or {}
-    sheet = loc.get("sheet")
     row = loc.get("row")
     if not row:
         return {"note": f"taxonomy/无单点 locator: {loc}"}
     try:
-        if sheet == "财务数据":
-            r = grid.fin.get(row)
-            return {"source": "grid.fin", "row_label": row, "cells": _cells_dict(r)} if r else {"note": f"fin 无 {row!r}"}
-        if sheet == "装机":
-            r = grid.cap.get(row)
-            return {"source": "grid.cap", "row_label": row, "cells": _cells_dict(r)} if r else {"note": f"cap 无 {row!r}"}
-        if sheet == "发电量":
-            r = grid.gen_subtotals.get(row)
-            return {"source": "grid.gen_subtotals", "emit_key": row, "cells": _cells_dict(r)} if r else {"note": f"gen_subtotals 无 {row!r}"}
+        r = grid.resolve_locator(loc)
     except Exception as e:
         return {"note": f"切片异常: {e}"}
-    return {"note": f"locator 未覆盖: {loc}"}
+    if not r:
+        sheet = loc.get("sheet", "?")
+        return {"note": f"{_SOURCE_LABEL.get(sheet, sheet)} 无 {row!r}"}
+    return {
+        "source": _SOURCE_LABEL.get(loc.get("sheet", ""), "grid"),
+        "row_label": row,
+        "cells": _cells_dict(r),
+    }
 
 
 def _cells_dict(row: dict | None) -> dict:

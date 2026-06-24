@@ -38,16 +38,144 @@ class Cell:
 
 @dataclass
 class Grid:
-    fin: dict = None
-    cap: dict = None
-    gen_projects: list = None
-    gen_subtotals: dict = None
+    """通用 schema 驱动的解析产物。
+
+    源真相容器(按逻辑表名 TableSpec.name 索引,sheet 名不再参与路由):
+    - row_maps:    {table_name: {label: {colkey: Cell}}}      target=row_map
+    - subtotals:   {table_name: {emit_key: {colkey: Cell}}}   target=gen_subtotals
+    - details:     {table_name: [project_dict]}               target=gen_detail
+    - table_index: {table_name: {sheet, target}}              locator 解析 + 别名投影
+    - sheet_dispatch: {sheet: [table_name]}                   可观测性(装载副产物,不参与路由)
+
+    fin/cap/gen_projects/gen_subtotals 为向后兼容 @property 别名,
+    按 (sheet, target) 投射首个匹配表 —— 三峡遗留消费方(semantic_proposer /
+    preprocess / 页面 / 脚本 / 测试)可直接访问,无需感知泛型容器。
+    """
+    row_maps: dict = None
+    subtotals: dict = None
+    details: dict = None
+    table_index: dict = None
+    sheet_dispatch: dict = None
 
     def __post_init__(self):
-        if self.fin is None: self.fin = {}
-        if self.cap is None: self.cap = {}
-        if self.gen_projects is None: self.gen_projects = []
-        if self.gen_subtotals is None: self.gen_subtotals = {}
+        if self.row_maps is None: self.row_maps = {}
+        if self.subtotals is None: self.subtotals = {}
+        if self.details is None: self.details = {}
+        if self.table_index is None: self.table_index = {}
+        if self.sheet_dispatch is None: self.sheet_dispatch = {}
+
+    # ============================================================ 向后兼容别名
+    def _first(self, sheet: str, target: str):
+        """(sheet, target) → 首个匹配表的真实容器(三峡遗留 fin/cap/gen_* 投射用)。"""
+        for name, meta in self.table_index.items():
+            if meta.get("sheet") == sheet and meta.get("target") == target:
+                if target == "row_map": return self.row_maps.get(name, {})
+                if target == "gen_subtotals": return self.subtotals.get(name, {})
+                if target == "gen_detail": return self.details.get(name, [])
+        return [] if target == "gen_detail" else {}
+
+    @property
+    def fin(self): return self._first("财务数据", "row_map")
+    @property
+    def cap(self): return self._first("装机", "row_map")
+    @property
+    def gen_subtotals(self): return self._first("发电量", "gen_subtotals")
+    @property
+    def gen_projects(self): return self._first("发电量", "gen_detail")
+
+    # ============================================================ 派发接缝(table 键驱动)
+    def resolve_locator(self, loc: dict) -> dict | None:
+        """语义层 locator → 行字典 {colkey: Cell} 或 None。table 键驱动 + sheet 回退。
+
+        解析顺序:
+        1. loc["table"] 命中真实表名 → 直接取该表容器(任意陌生 Excel 的主路径)
+        2. 否则回退到 sheet 上匹配的表(三峡遗留 locator 只给 sheet+row):
+           先查 row_map 表(_match_row_struct 精确→前缀),再查 subtotal 表(emit_key)
+        row 缺省(纯 taxonomy 指标)返回 None。
+        """
+        if not loc:
+            return None
+        name = loc.get("table")
+        if name and name in self.table_index:
+            return self._resolve_in_table(name, loc)
+        sheet = loc.get("sheet")
+        row = loc.get("row", "")
+        if not sheet:
+            return None
+        for tname, meta in self.table_index.items():
+            if meta.get("sheet") == sheet and meta.get("target") == "row_map":
+                r = _match_row_struct(self.row_maps.get(tname, {}), row)
+                if r is not None:
+                    return r
+        if row:
+            for tname, meta in self.table_index.items():
+                if meta.get("sheet") == sheet and meta.get("target") == "gen_subtotals":
+                    r = self.subtotals.get(tname, {}).get(_subtotal_region_key(row))
+                    if r is not None:
+                        return r
+        return None
+
+    def _resolve_in_table(self, name: str, loc: dict) -> dict | None:
+        """loc["table"] 直接命中时的取数(detail 表不经 locator,走 taxonomy)。"""
+        meta = self.table_index[name]
+        row = loc.get("row", "")
+        target = meta.get("target")
+        if target == "row_map":
+            return _match_row_struct(self.row_maps.get(name, {}), row)
+        if target == "gen_subtotals":
+            if not row:
+                return None
+            return self.subtotals.get(name, {}).get(_subtotal_region_key(row))
+        return None
+
+    def iter_row_maps(self):
+        """遍历所有 row_map 表,产出 (sheet名, 行标签, 行字典)。顺序遵循 table_index。"""
+        for name, meta in self.table_index.items():
+            if meta.get("target") != "row_map":
+                continue
+            sheet = meta.get("sheet")
+            for label, cells in self.row_maps.get(name, {}).items():
+                yield sheet, label, cells
+
+    def iter_subtotals(self):
+        """遍历所有 gen_subtotals 表,产出 (sheet名, emit_key, 行字典)。"""
+        for name, meta in self.table_index.items():
+            if meta.get("target") != "gen_subtotals":
+                continue
+            sheet = meta.get("sheet")
+            for emit_key, cells in self.subtotals.get(name, {}).items():
+                yield sheet, emit_key, cells
+
+    def iter_details(self):
+        """遍历所有 gen_detail 表,产出 (sheet名, project_dict)。"""
+        for name, meta in self.table_index.items():
+            if meta.get("target") != "gen_detail":
+                continue
+            sheet = meta.get("sheet")
+            for proj in self.details.get(name, []):
+                yield sheet, proj
+
+
+# 行匹配 + subtotal 键归一(与 backend._match_row_struct / _subtotal_region_key 同源)。
+# 放 loader 顶层供 Grid.resolve_locator 用,避免 loader→backend 反向依赖。
+def _match_row_struct(struct: dict, row_label: str):
+    """精确 → "（"前缀 startswith。返回行字典或 None。"""
+    if not row_label:
+        return None
+    if row_label in struct:
+        return struct[row_label]
+    prefix = row_label.split("（")[0]
+    for k, v in struct.items():
+        if k == row_label or k.startswith(prefix):
+            return v
+    return None
+
+
+_SUBTOTAL_KEY_MAP = {"发电量合计": "合计"}
+
+
+def _subtotal_region_key(loc_row: str) -> str:
+    return _SUBTOTAL_KEY_MAP.get(loc_row, loc_row)
 
 
 # 内部贡献(loader 内部流转,Grid 字段直接收)
@@ -63,14 +191,27 @@ def _num(v) -> float | None:
         return None
 
 
+# 6 位 YYYYMM 裸数字(Excel 常把"202601"这类月份表头存成数字,pandas 读成 float 带 .0 残留)。
+# 仅匹配整串 6 位数字(+ 可选 .0+ float 残留);年月都合法才归一化,避免误吞邮编/ID 等纯数字表头。
+_YM_RE = re.compile(r"^(\d{4})(\d{2})(?:\.0+)?$")
+
+
 def _colkey(h) -> str | None:
-    """归一化表头: datetime → 'YYYY-MM'; 字符串原样保留; None/空/nan → None。"""
+    """归一化表头:datetime → 'YYYY-MM';6 位 YYYYMM 裸数字(含 .0)→ 'YYYY-MM';
+    其余字符串原样保留;None/空/nan → None。"""
     if h is None:
         return None
     if hasattr(h, "strftime"):
         return h.strftime("%Y-%m")
     s = str(h).strip()
-    return s if s and s.lower() != "nan" else None
+    if not s or s.lower() == "nan":
+        return None
+    ym = _YM_RE.match(s)
+    if ym:
+        y, m = int(ym.group(1)), int(ym.group(2))
+        if 1900 <= y <= 2100 and 1 <= m <= 12:
+            return f"{y:04d}-{m:02d}"
+    return s
 
 
 def _cell(sheet: str, raw, r: int, c: int) -> Cell | None:
@@ -126,6 +267,19 @@ def _resolve_colkeys(df, spec: SS.TableSpec, data_col_indices: list[int]) -> dic
         else:
             out[c] = _colkey(df.iloc[spec.header_row, c])
     return out
+
+
+def resolve_data_colkeys(spec: SS.TableSpec, df) -> list[str]:
+    """数据范围**全部**列的 colkey 列表(按 idx 升序,过滤 None)。
+
+    与 _resolve_data_col_indices + _resolve_colkeys 配套使用,但输出 list[str] 而非 dict:
+    - 供"构造预览"在 contribs 因列全空而拿不到 colkey 时,仍展示该列(列头 + 空 cell)。
+    - 单测 + 页面都消费这个列表,避免页面侧重复实现 colkey 解析逻辑。
+    顺序即 idx 顺序,对应 Excel 列从左到右。None colkey(表头为空)直接跳过。
+    """
+    indices = _resolve_data_col_indices(spec, df.shape[1])
+    colkey_map = _resolve_colkeys(df, spec, indices)
+    return [colkey_map[c] for c in indices if colkey_map.get(c)]
 
 
 # ============================================================ 行准入逻辑
@@ -215,13 +369,14 @@ def load_table(df, sheet_name: str, spec: SS.TableSpec) -> list[Contribution]:
             _handle_duplicate(seen_labels, label, spec, sheet_name, r)
             contributions.append(("row_map", label, values))
         elif spec.target == "gen_detail":
-            cls = spec.detail_classifier_cols
-            proj = {
-                "name": _text_at(df, r, cls.get("name")),
-                "方式": _text_at(df, r, cls.get("方式")),
-                "区域": _text_at(df, r, cls.get("区域")),
-                "values": values,
-            }
+            cls = spec.detail_classifier_cols or {}
+            # 分类维度字段动态来自 schema(三峡是 方式/区域;任意 Excel 是任意键),
+            # 不再写死"方式"/"区域"——泛型化前提。
+            proj = {"name": _text_at(df, r, cls.get("name")), "values": values}
+            for dim, col_idx in cls.items():
+                if dim == "name":
+                    continue
+                proj[dim] = _text_at(df, r, col_idx)
             contributions.append(("gen_detail", proj))
         elif spec.target == "gen_subtotals":
             contributions.append(("gen_subtotals", emit_key, values))
@@ -277,24 +432,41 @@ def load_grid(
     engine = _pick_engine(wb_path, spec.engine)
 
     g = Grid()
+
+    # 派发记录闭包:把 sheet → [table_name] 记进 sheet_dispatch(仅可观测性,不参与路由)。
+    def _record(sheet: str, table_name: str) -> None:
+        bucket = g.sheet_dispatch.setdefault(sheet, [])
+        if table_name not in bucket:
+            bucket.append(table_name)
+
+    # 按 schema 遍历,每个 table 以自己的 TableSpec.name 为桶键落入对应通用容器。
+    # sheet 名只作为数据源地址(读 Excel 用),不再决定落到哪个 Grid 桶 ——
+    # 这正是"sheet 清单不与 Grid 派发绑定"的落点。
     for sh in spec.sheets:
         df = pd.read_excel(wb_path, sheet_name=sh.name, engine=engine, header=None)
         for tbl in sh.tables:
             if not tbl.enabled:
                 continue
+            # 选桶(target 决定容器形状),按逻辑表名开桶
+            if tbl.target == "row_map":
+                bucket = g.row_maps.setdefault(tbl.name, {})
+            elif tbl.target == "gen_subtotals":
+                bucket = g.subtotals.setdefault(tbl.name, {})
+            elif tbl.target == "gen_detail":
+                bucket = g.details.setdefault(tbl.name, [])
+            else:
+                continue
             for contrib in load_table(df, sh.name, tbl):
                 tag = contrib[0]
                 if tag == "row_map":
                     _, label, values = contrib
-                    # Sheet 名派发到 fin/cap(locator 派发键一致)
-                    if sh.name == "财务数据":
-                        g.fin[label] = values
-                    elif sh.name == "装机":
-                        g.cap[label] = values
-                    # 其他 row_map 表忽略
+                    bucket[label] = values
                 elif tag == "gen_detail":
-                    g.gen_projects.append(contrib[1])
+                    bucket.append(contrib[1])
                 elif tag == "gen_subtotals":
                     _, key, values = contrib
-                    g.gen_subtotals[key] = values
+                    bucket[key] = values
+                _record(sh.name, tbl.name)
+            # 登记 table_index:locator 解析 + fin/cap/gen_* 别名投影均依赖它
+            g.table_index[tbl.name] = {"sheet": sh.name, "target": tbl.target}
     return g

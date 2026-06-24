@@ -51,26 +51,17 @@ def build_db(xls_path: str, db_path: str) -> int:
     try:
         conn.executescript(DDL)
         rows: list[tuple] = []
-        # 财务数据(row_map)
-        for label, by_ck in grid.fin.items():
+        # row_map 表(财务数据/装机)——经 Grid.iter_row_maps 统一遍历
+        for sheet, label, by_ck in grid.iter_row_maps():
             for ck, c in by_ck.items():
                 rows.append((
-                    "财务数据", label, ck,
+                    sheet, label, ck,
                     None if c.value is None else str(c.value),
                     c.value if c.numeric else None,
                     c.addr, 0, None, None, None,
                 ))
-        # 装机
-        for label, by_ck in grid.cap.items():
-            for ck, c in by_ck.items():
-                rows.append((
-                    "装机", label, ck,
-                    None if c.value is None else str(c.value),
-                    c.value if c.numeric else None,
-                    c.addr, 0, None, None, None,
-                ))
-        # 发电量 明细
-        for p in grid.gen_projects:
+        # 发电量 明细(gen_projects)
+        for _sheet, p in grid.iter_details():
             for ck, c in p["values"].items():
                 rows.append((
                     "发电量", p["name"], ck,
@@ -78,8 +69,8 @@ def build_db(xls_path: str, db_path: str) -> int:
                     c.value if c.numeric else None,
                     c.addr, 0, p["name"], p.get("方式"), p.get("区域"),
                 ))
-        # 发电量 小计
-        for region, by_ck in grid.gen_subtotals.items():
+        # 发电量 小计(gen_subtotals)
+        for _sheet, region, by_ck in grid.iter_subtotals():
             for ck, c in by_ck.items():
                 rows.append((
                     "发电量", f"小计_{region}", ck,

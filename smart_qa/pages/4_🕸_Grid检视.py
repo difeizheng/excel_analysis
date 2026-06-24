@@ -1,4 +1,8 @@
-"""工作台 · Grid 检视:load_grid 后 4 字段在线查看 + 按地址查 Cell。"""
+"""工作台 · Grid 检视:load_grid 后按表在线查看 + 按地址查 Cell。
+
+泛型化(2026-06):不再写死 fin/cap/gen_* 4 字段,改为遍历 grid.table_index
+按 target(row_map/subtotal/detail)动态生 tab。任意陌生 Excel 的所有表都可见。
+"""
 from __future__ import annotations
 import pandas as pd
 import streamlit as st
@@ -26,11 +30,18 @@ if grid is None:
 
 st.caption(f"当前任务: **{task.name}**")
 
+# ---- 通用统计:按 target 分组统计表数 ----
+def _count(target: str) -> int:
+    return sum(1 for m in grid.table_index.values() if m.get("target") == target)
+
+n_rowmap = _count("row_map")
+n_detail = _count("gen_detail")
+n_subtotal = _count("gen_subtotals")
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("fin 行", len(grid.fin))
-c2.metric("cap 行", len(grid.cap))
-c3.metric("gen_projects", len(grid.gen_projects))
-c4.metric("gen_subtotals", len(grid.gen_subtotals))
+c1.metric("表总数", len(grid.table_index))
+c2.metric("row_map 表", n_rowmap)
+c3.metric("detail 表", n_detail)
+c4.metric("subtotal 表", n_subtotal)
 
 
 def _row_map_to_df(rmap: dict) -> pd.DataFrame:
@@ -44,46 +55,81 @@ def _row_map_to_df(rmap: dict) -> pd.DataFrame:
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
-tabs = st.tabs(["fin 财务", "cap 装机", "gen_projects 明细", "gen_subtotals 小计"])
-with tabs[0]:
-    st.dataframe(_row_map_to_df(grid.fin), use_container_width=True)
-with tabs[1]:
-    st.dataframe(_row_map_to_df(grid.cap), use_container_width=True)
-with tabs[2]:
-    if grid.gen_projects:
-        rows = []
-        for p in grid.gen_projects:
-            base = {"name": p.get("name"), "方式": p.get("方式"), "区域": p.get("区域")}
-            for ck, c in (p.get("values") or {}).items():
-                base[str(ck)] = getattr(c, "value", None)
-            rows.append(base)
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-    else:
-        st.info("无 gen_projects")
-with tabs[3]:
-    st.dataframe(_row_map_to_df(grid.gen_subtotals), use_container_width=True)
+def _details_to_df(projects: list) -> pd.DataFrame:
+    """[{分类字段..., values:{colkey:Cell}}] -> DataFrame(动态列,不写死字段名)。"""
+    if not projects:
+        return pd.DataFrame()
+    rows = []
+    for p in projects:
+        base = {k: v for k, v in p.items() if k != "values"}  # 分类维度字段动态保留
+        for ck, c in (p.get("values") or {}).items():
+            base[str(ck)] = getattr(c, "value", None)
+        rows.append(base)
+    return pd.DataFrame(rows)
 
-# ---- 按地址查 Cell ----
+
+def _tab_icon(target: str | None) -> str:
+    return {"row_map": "📋", "gen_detail": "📝", "gen_subtotals": "∑"}.get(target, "·")
+
+
+# ---- 按 table_index 顺序动态生 tab(每表一个) ----
+# 顺序:row_map → detail → subtotal,与 table_index 插入(schema 遍历)顺序一致。
+def _tables_in_order():
+    seen = set()
+    for target in ("row_map", "gen_detail", "gen_subtotals"):
+        for name, meta in grid.table_index.items():
+            if meta.get("target") == target and name not in seen:
+                seen.add(name)
+                yield name, meta
+
+ordered = list(_tables_in_order())
+if not ordered:
+    st.info("当前 Grid 无任何启用的表。请到「Schema 编辑」检查 tables 的 enabled。")
+    st.stop()
+
+tabs = st.tabs([f"{_tab_icon(m.get('target'))} {name}" for name, m in ordered])
+for tab, (name, meta) in zip(tabs, ordered):
+    target = meta.get("target")
+    with tab:
+        st.caption(f"sheet: **{meta.get('sheet')}** · target: `{target}`")
+        if target == "row_map":
+            st.dataframe(_row_map_to_df(grid.row_maps.get(name, {})), use_container_width=True)
+        elif target == "gen_subtotals":
+            st.dataframe(_row_map_to_df(grid.subtotals.get(name, {})), use_container_width=True)
+        elif target == "gen_detail":
+            df = _details_to_df(grid.details.get(name, []))
+            if df.empty:
+                st.info(f"无 {name} 明细行")
+            else:
+                st.dataframe(df, use_container_width=True)
+
+
+# ---- 按地址查 Cell(遍历全部容器,通用) ----
 st.divider()
 st.subheader(f"{U.ICON_DET} 按地址查 Cell")
 addr = st.text_input("输入单元格地址(如 财务数据!J6)")
 if addr:
     found = None
-    for field in ("fin", "cap", "gen_subtotals"):
-        for label, inner in getattr(grid, field).items():
-            for ck, c in inner.items():
-                if getattr(c, "addr", "") == addr:
-                    found = (f"{field}.{label}[{ck}]", c)
-                    break
-            if found:
+    for src, label, cells in grid.iter_row_maps():
+        for ck, c in cells.items():
+            if getattr(c, "addr", "") == addr:
+                found = (f"row_map[{src}].{label}[{ck}]", c)
                 break
         if found:
             break
     if not found:
-        for p in grid.gen_projects:
+        for src, emit_key, cells in grid.iter_subtotals():
+            for ck, c in cells.items():
+                if getattr(c, "addr", "") == addr:
+                    found = (f"subtotal[{src}].{emit_key}[{ck}]", c)
+                    break
+            if found:
+                break
+    if not found:
+        for src, p in grid.iter_details():
             for ck, c in (p.get("values") or {}).items():
                 if getattr(c, "addr", "") == addr:
-                    found = (f"gen_projects[{p.get('name')}][{ck}]", c)
+                    found = (f"detail[{src}][{p.get('name')}][{ck}]", c)
                     break
             if found:
                 break

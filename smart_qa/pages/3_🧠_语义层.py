@@ -63,8 +63,12 @@ def _render_semantic_proposer():
     应用走 gated_write(批量写 4 文件 + 单次热重载 + 失效 + 语料闸门 diff)。
     """
     box = st.session_state.get(f"_semprop_{task.id}")  # {"files":{fn:yaml}, "gate":{...}}
+    # 生成入口(可折叠 expander)。结果展示刻意放在 expander **之外**——streamlit 禁止
+    # expander 嵌套(曾在此触发 StreamlitAPIException: Expanders may not be nested),
+    # 故"闸门详情/文件预览"用与生成入口同级的顶层 expander。
+    # expanded 取反:没结果时展开显入口;有结果时收起,把空间让给下方结果块。
     with st.expander(f"{U.ICON_LLM} 一键生成语义层(4 文件)—— LLM 起草 + 闸门复核",
-                     expanded=(box is not None)):
+                     expanded=(box is None)):
         st.caption(
             "从当前任务 Grid 标签草拟 metrics/taxonomy/synonyms(LLM)+ rules(年份模板),"
             "过 lint + resolve_locator 闸门。覆盖当前任务语义层(任务副本可逆);committed seed 不受影响。"
@@ -94,48 +98,49 @@ def _render_semantic_proposer():
                         st.session_state[f"_semprop_{task.id}"] = {"files": files, "gate": gate}
                         st.rerun()
 
-        if not box:
-            return
-        files, gate = box["files"], box["gate"]
-        n_fail = len(gate["resolve_fail"])
-        n_err = len(gate["errors"])
-        if n_err + n_fail:
-            st.error(f"闸门发现 {n_err + n_fail} 个问题(lint error {n_err} + 落地失败 {n_fail});"
-                     "仍可应用后人复核,或重新生成。")
-        else:
-            st.success(f"闸门通过:{gate['n_metrics']} 个指标,{gate['n_resolve_ok']} 个落地,"
-                       f"{len(gate['warns'])} 条建议。")
+    # ---- 结果展示(box 存在才渲染;此处 expander 均为顶层,不嵌套)----
+    if not box:
+        return
+    files, gate = box["files"], box["gate"]
+    n_fail = len(gate["resolve_fail"])
+    n_err = len(gate["errors"])
+    if n_err + n_fail:
+        st.error(f"闸门发现 {n_err + n_fail} 个问题(lint error {n_err} + 落地失败 {n_fail});"
+                 "仍可应用后人复核,或重新生成。")
+    else:
+        st.success(f"闸门通过:{gate['n_metrics']} 个指标,{gate['n_resolve_ok']} 个落地,"
+                   f"{len(gate['warns'])} 条建议。")
 
-        with st.expander("闸门详情"):
-            for r in gate["resolve_fail"]:
-                st.write(f"- 🔴 落地失败「{r['metric']}」:{r['msg']}")
-            for e in gate["errors"]:
-                st.write(f"- 🟠 lint error「{e['where']}」:{e['msg']}")
-            for w in gate["warns"][:20]:
-                st.write(f"- ⚪ {w['severity']}「{w['where']}」:{w['msg']}")
-            if len(gate["warns"]) > 20:
-                st.caption(f"... 其余 {len(gate['warns']) - 20} 条建议")
-        for fn in SEM_FILES:
-            with st.expander(f"📄 {fn}"):
-                st.code(files.get(fn, ""), language="yaml")
+    with st.expander("闸门详情"):
+        for r in gate["resolve_fail"]:
+            st.write(f"- 🔴 落地失败「{r['metric']}」:{r['msg']}")
+        for e in gate["errors"]:
+            st.write(f"- 🟠 lint error「{e['where']}」:{e['msg']}")
+        for w in gate["warns"][:20]:
+            st.write(f"- ⚪ {w['severity']}「{w['where']}」:{w['msg']}")
+        if len(gate["warns"]) > 20:
+            st.caption(f"... 其余 {len(gate['warns']) - 20} 条建议")
+    for fn in SEM_FILES:
+        with st.expander(f"📄 {fn}"):
+            st.code(files.get(fn, ""), language="yaml")
 
-        bc, bd = st.columns([1, 3])
-        if bc.button("✓ 应用全部到当前任务", type="primary", key=f"_semprop_apply_{task.id}"):
-            def _apply_all():
-                for fn in SEM_FILES:
-                    txt = files.get(fn, "")
-                    TS.write_task_semantic(task.id, fn, txt)
-                    sem[task.id]["texts"][fn] = txt
-                    st.session_state[f"sem_{task.id}_{fn}"] = txt
-                U.reload_current_semantic()
-                U.invalidate_grid()
-            U.gated_write(task.id, "语义层·LLM一键生成", _apply_all)
-            st.session_state.pop(f"_semprop_{task.id}", None)
-            st.success("已应用 4 文件到当前任务语义层。去问数台验证。")
-            st.rerun()
-        if bd.button("丢弃草稿", key=f"_semprop_discard_{task.id}"):
-            st.session_state.pop(f"_semprop_{task.id}", None)
-            st.rerun()
+    bc, bd = st.columns([1, 3])
+    if bc.button("✓ 应用全部到当前任务", type="primary", key=f"_semprop_apply_{task.id}"):
+        def _apply_all():
+            for fn in SEM_FILES:
+                txt = files.get(fn, "")
+                TS.write_task_semantic(task.id, fn, txt)
+                sem[task.id]["texts"][fn] = txt
+                st.session_state[f"sem_{task.id}_{fn}"] = txt
+            U.reload_current_semantic()
+            U.invalidate_grid()
+        U.gated_write(task.id, "语义层·LLM一键生成", _apply_all)
+        st.session_state.pop(f"_semprop_{task.id}", None)
+        st.success("已应用 4 文件到当前任务语义层。去问数台验证。")
+        st.rerun()
+    if bd.button("丢弃草稿", key=f"_semprop_discard_{task.id}"):
+        st.session_state.pop(f"_semprop_{task.id}", None)
+        st.rerun()
 
 
 _render_semantic_proposer()
@@ -215,12 +220,89 @@ def _commit_metrics(new_metrics: dict) -> None:
     _commit("metrics.yaml", SE.dump_metrics_yaml(new_metrics))
 
 
+# ⚠ 改 widget key(_sem_metric)必须放 on_click=callback:selectbox(key="_sem_metric")实例化后,
+# 在 handler 内 st.session_state["_sem_metric"]=v 会抛 "cannot be modified after the widget
+# is instantiated"(见 [[streamlit-widget-callback-trap]])。callback 在 widget 重渲染前执行,可安全
+# 改 key;内部从 sem 缓存读最新(与 _write_semantic 同步,避闭包——镜像 page2 _on_add_table 模式)。
+def _on_add_metric() -> None:
+    """新增默认名指标并选中它。"""
+    metrics = SE.load_metrics(sem[task.id]["texts"]["metrics.yaml"]) or {}
+    base, i = "新指标", 2
+    nm = base
+    while nm in metrics:
+        nm = f"{base}{i}"; i += 1
+    _commit_metrics(SE.add_metric(metrics, nm))
+    st.session_state["_sem_metric"] = nm             # callback 内改 widget key = 安全
+    st.session_state.pop("_sem_last_metric", None)    # 强制下次 seed 新指标的字段
+
+
+def _on_delete_metric() -> None:
+    """两步删除:首次点击 arm _sem_del_pending;再次点击确认并真删。"""
+    cur = st.session_state.get("_sem_metric", "")
+    if st.session_state.get("_sem_del_pending") == cur:
+        metrics = SE.load_metrics(sem[task.id]["texts"]["metrics.yaml"]) or {}
+        new_metrics = SE.delete_metric(metrics, cur)
+        _commit_metrics(new_metrics)
+        rest = [n for n in new_metrics if n]
+        st.session_state["_sem_metric"] = rest[0] if rest else ""  # clamp 到剩余首项(安全)
+        st.session_state.pop("_sem_del_pending", None)
+        st.session_state.pop("_sem_last_metric", None)  # 强制下次 seed
+    else:
+        st.session_state["_sem_del_pending"] = cur      # arm(非 widget key,安全)
+
+
 def _commit_taxonomy(new_taxonomy: dict) -> None:
     _commit("taxonomy.yaml", SE.dump_taxonomy_yaml(new_taxonomy))
 
 
 def _commit_synonyms(new_synonyms: dict) -> None:
     _commit("synonyms.yaml", SE.dump_synonyms_yaml(new_synonyms))
+
+
+# ⚠ 同 _on_add_metric:分类树"选 X + ➕/应用改 X"的 keyed-selectbox 配按钮,改 widget key
+# (_tax_cat/_tax_node)必须走 on_click=callback(见 [[streamlit-widget-callback-trap]])。
+# callback 从 sem 缓存读最新 taxonomy 避闭包;ValueError(重命名撞名)经 session flag 回显。
+def _on_add_category() -> None:
+    """新增默认名分类并选中。"""
+    taxonomy = SE.load_taxonomy(sem[task.id]["texts"]["taxonomy.yaml"]) or {}
+    nm, i = "新分类", 2
+    while nm in taxonomy:
+        nm = f"新分类{i}"; i += 1
+    _commit_taxonomy(SE.add_taxonomy_category(taxonomy, nm))
+    st.session_state["_tax_cat"] = nm
+
+
+def _on_add_node(cur_cat: str) -> None:
+    """在 cur_cat 下新增默认名节点并选中。"""
+    taxonomy = SE.load_taxonomy(sem[task.id]["texts"]["taxonomy.yaml"]) or {}
+    nm, i = "新节点", 2
+    while nm in (taxonomy.get(cur_cat) or {}):
+        nm = f"新节点{i}"; i += 1
+    _commit_taxonomy(SE.add_taxonomy_node(taxonomy, cur_cat, nm))
+    st.session_state["_tax_node"] = nm
+
+
+def _on_apply_node(cur_cat: str, cur_node: str) -> None:
+    """应用节点编辑(includes/description/重命名);重命名成功则切到新名(callback 内安全)。
+    with_taxonomy_node_edited 撞名抛 ValueError → 经 _tax_apply_err 回显,不阻断。"""
+    s = st.session_state
+    taxonomy = SE.load_taxonomy(sem[task.id]["texts"]["taxonomy.yaml"]) or {}
+    vals = {
+        "includes": [ln.strip() for ln in (s.get("_tax_includes", "") or "").splitlines() if ln.strip()],
+        "description": s.get("_tax_desc", ""),
+    }
+    nn = (s.get("_tax_newname") or "").strip()
+    if nn and nn != cur_node:
+        vals["_new_name"] = nn
+    try:
+        new_taxonomy = SE.with_taxonomy_node_edited(taxonomy, cur_cat, cur_node, vals)
+    except ValueError as e:
+        s["_tax_apply_err"] = str(e)
+        return
+    s.pop("_tax_apply_err", None)
+    _commit_taxonomy(new_taxonomy)
+    if nn and nn != cur_node:
+        st.session_state["_tax_node"] = nn
 
 
 def _render_lint(findings) -> None:
@@ -243,11 +325,26 @@ def _render_lint(findings) -> None:
 
 SHAPES = ["row_map", "subtotal", "taxonomy", "derived"]
 _SHAPE_LABEL = {
-    "row_map": "行标签定位(财务/装机扁平指标)",
-    "subtotal": "区域小计(发电量区域键)",
-    "taxonomy": "分类聚合(水电/风电/光伏)",
-    "derived": "派生指标(增长率等)",
+    "row_map": "行标签定位(扁平指标,按行标签取数)",
+    "subtotal": "小计(按小计键 emit_key 取数)",
+    "taxonomy": "分类聚合(按某维度汇总明细项目)",
+    "derived": "派生指标(由基准指标运算,如增长率)",
 }
+
+
+def _agg_options(schema: dict) -> list[str]:
+    """从 schema 的 detail 表分类维度动态生成聚合选项(sum_by_<维度>);无则回退默认。
+
+    三峡 schema 的 detail 表分类维度为 方式/区域 → 产出与历史一致的 ["sum_by_方式","sum_by_区域"]。
+    """
+    dims, seen = [], set()
+    for sh in (schema or {}).get("sheets") or []:
+        for tb in sh.get("tables") or []:
+            for d in (tb.get("detail_classifier_cols") or {}).keys():
+                if d != "name" and d not in seen:
+                    seen.add(d)
+                    dims.append(d)
+    return [f"sum_by_{d}" for d in dims] or ["sum_by_方式", "sum_by_区域"]
 
 
 def _seed_metric_keys(info: dict) -> None:
@@ -338,28 +435,12 @@ with tab_metric:
                              format_func=_fmt, key="_sem_metric")
             cur = s["_sem_metric"]
             with cs2:
-                if st.button("➕ 新增", use_container_width=True):
-                    base, i = "新指标", 2
-                    nm = base
-                    while nm in metrics:
-                        nm = f"{base}{i}"; i += 1
-                    _commit_metrics(SE.add_metric(metrics, nm))
-                    s["_sem_metric"] = nm
-                    st.rerun()
+                st.button("➕ 新增", use_container_width=True, on_click=_on_add_metric)
             with cs3:
                 pending = s.get("_sem_del_pending") == cur
-                if st.button("⚠ 确认删除?" if pending else "🗑 删除",
-                             use_container_width=True, disabled=not cur):
-                    if pending:
-                        new_metrics = SE.delete_metric(metrics, cur)
-                        _commit_metrics(new_metrics)
-                        s.pop("_sem_del_pending", None)
-                        rest = [n for n in new_metrics if n]
-                        s["_sem_metric"] = rest[0] if rest else ""
-                        st.rerun()
-                    else:
-                        s["_sem_del_pending"] = cur
-                        st.rerun()
+                st.button("⚠ 确认删除?" if pending else "🗑 删除",
+                          use_container_width=True, disabled=not cur,
+                          on_click=_on_delete_metric)
 
             # 切指标:灌入 _sem_* 键(无需 rerun)
             info = metrics.get(cur, {})
@@ -389,7 +470,7 @@ with tab_metric:
             elif shape == "taxonomy":
                 _pick("定位 sheet", sheet_opts, "_sem_sheet")
                 st.text_input("逻辑表 table(如「年度」)", key="_sem_table")
-                _pick("聚合方式 aggregation", ["sum_by_方式", "sum_by_区域"], "_sem_agg")
+                _pick("聚合方式 aggregation", _agg_options(schema), "_sem_agg")
                 _pick("分类节点 taxonomy_node", SE.taxonomy_node_options(taxonomy or {}), "_sem_taxnode")
             elif shape == "derived":
                 _pick("基准指标 base_metric", [n for n in names if n != cur], "_sem_basemetric")
@@ -449,7 +530,8 @@ with tab_metric:
         st.divider()
         with st.expander("❓ 问句教学(教系统认识一个说法 / 新建指标)", expanded=False):
             q = st.text_input("输入一句话,看系统现在认不认识",
-                              "公司2024年风电发电量是多少", key="_teach_q")
+                              "", key="_teach_q",
+                              placeholder="用本任务的真实指标问一句,如「2024年收入是多少」")
             if q:
                 ent = S.resolve_entity(q)
                 met = S.resolve_metric(q)
@@ -514,13 +596,7 @@ with tab_taxsyn:
                 else:
                     st.caption("(无分类树)")
             with tc2:
-                if st.button("➕ 分类"):
-                    nm, i = "新分类", 2
-                    while nm in taxonomy:
-                        nm = f"新分类{i}"; i += 1
-                    _commit_taxonomy(SE.add_taxonomy_category(taxonomy, nm))
-                    s["_tax_cat"] = nm
-                    st.rerun()
+                st.button("➕ 分类", on_click=_on_add_category)
             with tc3:
                 cur_cat = s.get("_tax_cat")
                 if st.button("🗑 分类", disabled=not cur_cat):
@@ -545,13 +621,7 @@ with tab_taxsyn:
                     else:
                         st.caption("(无节点)")
                 with nc2:
-                    if st.button("➕ 节点"):
-                        nm, i = "新节点", 2
-                        while nm in (taxonomy.get(cur_cat) or {}):
-                            nm = f"新节点{i}"; i += 1
-                        _commit_taxonomy(SE.add_taxonomy_node(taxonomy, cur_cat, nm))
-                        s["_tax_node"] = nm
-                        st.rerun()
+                    st.button("➕ 节点", on_click=_on_add_node, args=(cur_cat,))
                 with nc3:
                     cur_node = s.get("_tax_node")
                     if st.button("🗑 节点", disabled=not cur_node):
@@ -568,25 +638,10 @@ with tab_taxsyn:
                                  value="\n".join(node["includes"]), key="_tax_includes", height=90)
                     if not node["is_list"]:
                         st.text_input("description", value=node["description"], key="_tax_desc")
-                    if st.button("✓ 应用此节点", type="primary"):
-                        vals = {
-                            "includes": [ln.strip() for ln in (s.get("_tax_includes", "") or "")
-                                         .splitlines() if ln.strip()],
-                            "description": s.get("_tax_desc", ""),
-                        }
-                        nn = (s.get("_tax_newname") or "").strip()
-                        if nn and nn != cur_node:
-                            vals["_new_name"] = nn
-                        try:
-                            _commit_taxonomy(SE.with_taxonomy_node_edited(
-                                taxonomy, cur_cat, cur_node, vals))
-                        except ValueError as e:
-                            st.error(str(e))
-                        else:
-                            if nn and nn != cur_node:
-                                s["_tax_node"] = nn
-                            st.toast("已应用", icon="✅")
-                            st.rerun()
+                    if s.get("_tax_apply_err"):
+                        st.error(s["_tax_apply_err"])
+                    st.button("✓ 应用此节点", type="primary",
+                              on_click=_on_apply_node, args=(cur_cat, cur_node))
 
     # ---- 指标别名(口语⇄标准,标准=指标下拉)----
     with sub_ma:

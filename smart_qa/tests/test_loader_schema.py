@@ -156,6 +156,45 @@ class TestSchemaLoaderEquivalence:
             )
 
 
+class TestSheetDispatchContract:
+    """锁住 load_grid 的 sheet_dispatch 派发契约 —— UI 端唯一真相源。
+
+    派发目标 = 逻辑表名(TableSpec.name),不再是 fin/cap/gen_* 字段名
+    (Grid 泛型化后,sheet 名不再决定 Grid 桶;sheet_dispatch 仅作可观测性)。
+
+    一旦此处改期望值,意味着:① loader 的派发逻辑变了(应同步走「重构前先锁 golden」流程),
+    或 ② 模板 schema 的 sheet/table target/name 改了(应同步走 schema 闸门)。
+    """
+
+    EXPECTED = {
+        "财务数据": ["财务主表"],
+        "装机": ["装机主表"],
+        "发电量": ["年度明细", "年度小计"],  # 顺序由 spec 遍历顺序决定
+    }
+
+    def test_dispatch_is_dict(self, live_grid):
+        assert isinstance(live_grid.sheet_dispatch, dict)
+
+    def test_dispatch_keys_match_template_sheets(self, live_grid):
+        assert set(live_grid.sheet_dispatch.keys()) == set(self.EXPECTED.keys()), \
+            f"派发集合不符: live={sorted(live_grid.sheet_dispatch.keys())} " \
+            f"vs expected={sorted(self.EXPECTED.keys())}"
+
+    def test_dispatch_field_mapping(self, live_grid):
+        for sheet, fields in self.EXPECTED.items():
+            assert live_grid.sheet_dispatch[sheet] == fields, \
+                f"{sheet} 派发字段: live={live_grid.sheet_dispatch[sheet]} vs expected={fields}"
+
+    def test_dispatch_only_for_actually_dispatched_sheets(self, live_grid):
+        """schema 中存在但 enabled=false 或 0 行的 sheet,不应出现在 dispatch。
+        模板 schema 的「发电量/月度」表 enabled=false,本断言间接验证了这一点:
+        发电量下不应多出第三个字段,也确保了「装机」不会被 row_map 之外的 tag 误记。
+        """
+        assert "发电量" in live_grid.sheet_dispatch
+        assert len(live_grid.sheet_dispatch["发电量"]) == 2, \
+            f"发电量只应派发到 2 个表(年度明细+年度小计),实得 {live_grid.sheet_dispatch['发电量']}"
+
+
 class TestSchemaLoaderKeyRows:
     """关键指标必须能被定位(回退到 qa.ask 的实际入口)。"""
 

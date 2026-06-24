@@ -22,6 +22,76 @@ import yaml
 UNSET = -1
 
 
+# ============================================================ dce 语义桥(UI INCLUSIVE ↔ YAML EXCLUSIVE)
+# 为什么需要这个桥:
+# - 后端(loader / validate / schema_spec)统一把 data_col_end 当 EXCLUSIVE(slice 终止 idx)。
+# - 但 UI 上 "用户选中第 5 列" 在认知里是 "包含第 5 列"(INCLUSIVE)。直接让 UI 选 5 → YAML 写 5,
+#   loader 切片 [start, 5) 会把第 5 列漏掉,产生"我明明选了 5 列却少了一列"的诡异 UX。
+# - 解法:UI 选 N → 写 YAML 时 N+1;YAML 读 N → UI 显示 N-1。两者通过 _yaml_to_viz_dce / _viz_to_yaml_dce 桥接,
+#   YAML 文件兼容老 EXCLUSIVE 值,后端零改动。
+def _yaml_to_viz_dce(dce, n_cols: int) -> int:
+    """YAML EXCLUSIVE → UI INCLUSIVE(给 selectbox 显示)。
+
+    边界语义(继承既有 seed 行为并修正 `dce == n_cols`):
+    - dce is None / UNSET → UNSET(原 yaml 没有 data_col_end 或显式 None)
+    - dce <= 0 → UNSET(EXCLUSIVE ≤0 是空范围/越界,无意义)
+    - dce > n_cols → UNSET(EXCLUSIVE 越界,stale,默认走 df_shape1)
+    - **dce == n_cols → n_cols - 1**(原 EXCLUSIVE n_cols = 切片到末尾,与
+      UI "包含最后一列"等价;之前误归 UNSET,用户看不出"已选最后一列")
+    - 其他合法 EXCLUSIVE 值 (1..n_cols-1):返回 dce - 1(转 INCLUSIVE)
+    """
+    if dce is None or dce == UNSET:
+        return UNSET
+    if not isinstance(dce, int) or dce <= 0 or dce > n_cols:
+        return UNSET
+    if dce == n_cols:
+        return n_cols - 1
+    return dce - 1
+
+
+def _viz_to_yaml_dce(viz_dce) -> int | None:
+    """UI INCLUSIVE → YAML EXCLUSIVE(给 with_table_edited 写入)。
+
+    UNSET/None → None(调用方应删键);其他 → viz_dce + 1。
+    不在此处做越界校验(调用方负责);若 viz_dce >= n_cols,+1 后 = n_cols,后端视为 "到末尾",语义正确。
+    """
+    if viz_dce is None or viz_dce == UNSET:
+        return None
+    return int(viz_dce) + 1
+
+
+# ============================================================ viz 键 clamp
+def clamp_viz_keys(d: dict, n_rows: int, n_cols: int) -> None:
+    """把 dict 中的 viz 键就地 clamp 到当前 sheet 的合法域(防 selectbox 越界)。
+
+    用法:从 st.session_state 拷出 viz 键 dict,传入此函数,再写回。
+    不直接操作 session_state — 纯函数易测。
+
+    防 stale 越界("X is not in iterable"):
+    智能填充、YAML 写回、切 sheet 等任何路径产生的越界值,在 widget 渲染前降级。
+
+    越界处理策略:
+    - 行键(_viz_hdr/_viz_fdr):clamp 到 [0, n_rows-1](保留用户的相对选择)
+    - 行尾 _viz_ldr:越界 → UNSET(语义"末尾"由 UNSET 表达)
+    - 列键(_viz_lci/_viz_dcs/_viz_dmc/_viz_dce):越界 → UNSET
+      列键 clamp 到边界没意义(用户没意图选边界),reset 让用户看到"之前不适用"
+    """
+    row_max = max(n_rows - 1, 0)
+    col_max = max(n_cols - 1, 0)
+
+    for k in ("_viz_hdr", "_viz_fdr"):
+        v = d.get(k)
+        if isinstance(v, int) and v != UNSET and not (0 <= v <= row_max):
+            d[k] = max(0, min(row_max, v))
+    ldr = d.get("_viz_ldr")
+    if isinstance(ldr, int) and ldr != UNSET and not (0 <= ldr <= row_max):
+        d["_viz_ldr"] = UNSET
+    for k in ("_viz_lci", "_viz_dcs", "_viz_dmc", "_viz_dce"):
+        v = d.get(k)
+        if isinstance(v, int) and v != UNSET and not (0 <= v <= col_max):
+            d[k] = UNSET
+
+
 # ---------------------------------------------------------------- 行列标尺
 def col_letter(idx: int) -> str:
     """0-based 列号 → Excel 列字母(0→A, 25→Z, 26→AA, 27→AB)。负数返回 '?'。"""
@@ -84,10 +154,14 @@ EDITABLE_KEYS = (
 def with_table_edited(raw: dict, sheet_idx: int, table_idx: int, values: dict) -> dict:
     """返回 raw 的深拷贝,其中指定 table 被 values 覆盖(不可变风格,不改入参)。
 
-    values 键见 EDITABLE_KEYS + 'target'。
+    values 键见 EDITABLE_KEYS + 'target' + 'name'。
+    - name:非空(str)→ 写入;空串/缺省 → 不动(保留原名,防误清空成无名表)。
     - 必填(header_row/first_data_row/label_col_idx):始终写入(UNSET→0 兜底)。
-    - 可选(last_data_row/data_col_start/data_col_end/detail_marker_col_idx):
+    - 可选(last_data_row/data_col_start/detail_marker_col_idx):
       UNSET/None → 删除该键(loader 视为默认/到末尾);否则写 int。
+    - **data_col_end:UI 语义 INCLUSIVE(含本列)→ 内部 _viz_to_yaml_dce 转 EXCLUSIVE(+1) 写入。
+      UNSET/None → 删键(loader 用 df_shape1 作默认=到末尾)。**
+      这一约定让 UI 选"第 N 列"语义直观,后端 loader / validate 零改动。
     - 高级字段(subtotal_rules/detail_classifier_cols/skip_labels 等)原样保留。
     越界或结构异常时原样返回拷贝(不抛)。
     """
@@ -106,6 +180,14 @@ def with_table_edited(raw: dict, sheet_idx: int, table_idx: int, values: dict) -
     if values.get("target"):
         table["target"] = values["target"]
 
+    # 表名:非空才写(空串保留原名,防误清空)
+    if values.get("name"):
+        table["name"] = str(values["name"])
+
+    # enabled 字段:bool → 直接写入(True/False)
+    if "enabled" in values:
+        table["enabled"] = bool(values["enabled"])
+
     # 必填字段:有合理值就写,UNSET→0
     for key in ("header_row", "first_data_row", "label_col_idx"):
         if key in values:
@@ -113,13 +195,21 @@ def with_table_edited(raw: dict, sheet_idx: int, table_idx: int, values: dict) -
             table[key] = 0 if v in (UNSET, None) else int(v)
 
     # 可选字段:UNSET/None → 删除键;否则写 int
-    for key in ("last_data_row", "data_col_start", "data_col_end", "detail_marker_col_idx"):
+    for key in ("last_data_row", "data_col_start", "detail_marker_col_idx"):
         if key in values:
             v = values[key]
             if v in (UNSET, None):
                 table.pop(key, None)
             else:
                 table[key] = int(v)
+
+    # data_col_end:UI INCLUSIVE → YAML EXCLUSIVE(+1 转换由 _viz_to_yaml_dce 完成)
+    if "data_col_end" in values:
+        yaml_dce = _viz_to_yaml_dce(values["data_col_end"])
+        if yaml_dce is None:
+            table.pop("data_col_end", None)
+        else:
+            table["data_col_end"] = yaml_dce
 
     # 高级字段(由可视化"高级编辑"文本区解析而来):空 → 删键;非空 → 覆盖
     if "subtotal_rules" in values:
@@ -147,6 +237,51 @@ def with_table_edited(raw: dict, sheet_idx: int, table_idx: int, values: dict) -
         else:
             table.pop("skip_label_regex", None)
 
+    return out
+
+
+# ---------------------------------------------------------------- table 增删
+def with_table_added(raw: dict, sheet_idx: int, table_dict: dict) -> dict:
+    """返回 raw 的深拷贝,其中指定 sheet 的 tables 末尾追加 table_dict(不可变,不改入参)。
+
+    table_dict 应为合规的 TableSpec dict(至少含 name/header_row/first_data_row/target);
+    UI 层调用方负责构造默认占位字段(包括 enabled:false 不污染 Grid)。
+
+    越界 sheet_idx 或结构异常时原样返回深拷贝(不抛,与 with_table_edited 风格一致)。
+    """
+    out = copy.deepcopy(raw) if isinstance(raw, dict) else {}
+    if not isinstance(raw, dict):
+        return out
+    sheets = out.get("sheets") or []
+    if not (0 <= sheet_idx < len(sheets)):
+        return out
+    if not isinstance(sheets[sheet_idx], dict):
+        return out
+    tables = sheets[sheet_idx].setdefault("tables", [])
+    if not isinstance(tables, list):
+        return out
+    tables.append(dict(table_dict))  # 防御:拷一层,避免外部 mutate 污染
+    return out
+
+
+def with_table_removed(raw: dict, sheet_idx: int, table_idx: int) -> dict:
+    """返回 raw 的深拷贝,其中指定 sheet 的 tables 弹出 table_idx 位置(不可变,不改入参)。
+
+    越界 sheet_idx/table_idx 原样返回深拷贝(不抛);list 仅剩 1 张表时 pop 后变空 list,
+    不阻断 — viz tab :287-289 已有空 tables 的「请去 YAML 添加」提示兜底。
+    """
+    out = copy.deepcopy(raw) if isinstance(raw, dict) else {}
+    if not isinstance(raw, dict):
+        return out
+    sheets = out.get("sheets") or []
+    if not (0 <= sheet_idx < len(sheets)):
+        return out
+    tables = sheets[sheet_idx].get("tables") or []
+    if not isinstance(tables, list):
+        return out
+    if not (0 <= table_idx < len(tables)):
+        return out
+    tables.pop(table_idx)
     return out
 
 
@@ -263,13 +398,14 @@ def preflight_table(vals: dict, n_cols: int):
         )
         hl += [("row", hr), ("row", fdr)]
     dcs, dce = vals.get("data_col_start"), vals.get("data_col_end")
+    # UI INCLUSIVE 语义:起==止 为合法单列范围,仅起>止 报错
     if (isinstance(dcs, int) and dcs != UNSET and isinstance(dce, int)
-            and dce != UNSET and dcs >= dce):
+            and dce != UNSET and dcs > dce):
         msgs.append(
-            f"数据起始列(c{dcs} · {col_letter(dcs)}列)必须早于终止列"
-            f"(c{dce} · {col_letter(dce)}列,不含本列);当前起≥止。"
+            f"数据起始列(c{dcs} · {col_letter(dcs)}列)必须早于或等于终止列"
+            f"(c{dce} · {col_letter(dce)}列,含本列);当前起>止。"
         )
-        hl += [("col", dcs), ("col", max(dce - 1, 0))]
+        hl += [("col", dcs), ("col", dce)]
     lci = vals.get("label_col_idx")
     if isinstance(lci, int) and lci != UNSET and not (0 <= lci < n_cols):
         msgs.append(f"标签列(c{lci})超出预览列数(共 {n_cols} 列)。")
@@ -439,3 +575,83 @@ def suggest_fields(
             if text_count(dmc) > 0:
                 out["detail_marker_col_idx"] = dmc
     return out
+
+
+# ---------------------------------------------------------------- 构造预览(loader 产物 → 表格/JSON)
+def _cell_value(cell):
+    """从 loader.Cell(或鸭子类型)取值;非 Cell 直接原样返回。"""
+    return getattr(cell, "value", cell)
+
+
+def contributions_to_preview(contribs, target: str, expected_columns: list[str] | None = None):
+    """loader.load_table 的输出 → (rows, columns, json_obj) 供页面渲染。
+
+    纯逻辑(无 pandas/streamlit),便于单测;页面侧负责 list[dict] → DataFrame。
+    与 loader 产物的契约:
+      row_map       contrib = ("row_map", label, {ck: Cell})
+      gen_subtotals contrib = ("gen_subtotals", emit_key, {ck: Cell})
+      gen_detail    contrib = ("gen_detail", {name, 方式, 区域, values:{ck: Cell}})
+
+    返回:
+      rows    — list[dict],每行 = 行首标识列 + 各数据列键(缺失列不在 dict → 页面 fillna)
+      columns — list[str],完整有序表头(标识列 + expected_columns + colkeys 并集,first-seen),
+                保证 DataFrame 列顺序;传 expected_columns 让全空列也展示(列头 + 空 cell)
+      json_obj — loader 产物的规范结构(row_map/gen_subtotals → dict;gen_detail → list)
+    空结果 → ([], [], {}) ;gen_detail 空结果 → ([], [], [])。
+    值经 getattr(cell, 'value', cell) 取(鸭子类型,测试可用 loader.Cell 或 shim)。
+    """
+    if not contribs:
+        return [], [], ([] if target == "gen_detail" else {})
+
+    if target == "gen_detail":
+        colkeys: list[str] = []
+        seen: set[str] = set()
+        # expected_columns 先入(列全空也能展示)
+        for ck in (expected_columns or []):
+            if ck not in seen:
+                seen.add(ck)
+                colkeys.append(ck)
+        for c in contribs:
+            for ck in (c[1].get("values") or {}):
+                if ck not in seen:
+                    seen.add(ck)
+                    colkeys.append(ck)
+        rows: list[dict] = []
+        json_obj: list[dict] = []
+        for _, proj in contribs:
+            vals = proj.get("values") or {}
+            rows.append({
+                "name": proj.get("name", ""),
+                "方式": proj.get("方式", ""),
+                "区域": proj.get("区域", ""),
+                **{ck: _cell_value(vals[ck]) for ck in colkeys if ck in vals},
+            })
+            json_obj.append({
+                "name": proj.get("name", ""),
+                "方式": proj.get("方式", ""),
+                "区域": proj.get("区域", ""),
+                "values": {ck: _cell_value(cell) for ck, cell in vals.items()},
+            })
+        return rows, ["name", "方式", "区域"] + colkeys, json_obj
+
+    # row_map / gen_subtotals:contrib = (tag, key, {ck: Cell})
+    label_col = "标签" if target == "row_map" else "小计"
+    colkeys = []
+    seen = set()
+    # expected_columns 先入(让列全空也展示)
+    for ck in (expected_columns or []):
+        if ck not in seen:
+            seen.add(ck)
+            colkeys.append(ck)
+    for c in contribs:
+        for ck in (c[2] or {}):
+            if ck not in seen:
+                seen.add(ck)
+                colkeys.append(ck)
+    rows = []
+    json_obj: dict = {}
+    for _, key, vals in contribs:
+        rows.append({label_col: key,
+                     **{ck: _cell_value(vals[ck]) for ck in colkeys if ck in vals}})
+        json_obj[key] = {ck: _cell_value(cell) for ck, cell in (vals or {}).items()}
+    return rows, [label_col] + colkeys, json_obj

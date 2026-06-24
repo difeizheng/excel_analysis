@@ -40,9 +40,11 @@ def _load_sem(name: str) -> dict:
 # ============================================================ 标签清单(无数值泄漏)
 def test_build_label_inventory_labels(grid_legacy):
     inv = SP.build_label_inventory(grid_legacy, _seed_schema())
-    fin_labels = inv["sheets"]["财务数据"]["row_labels"]
-    assert "利润总额" in fin_labels
-    assert "巴西" in inv["sheets"]["发电量"]["subtotal_keys"]
+    # table-centric:row_map 表(财务主表)行标签含利润总额;subtotal 表(年度小计)含巴西
+    fin_tbl = next(t for t in inv["tables"] if t["target"] == "row_map" and "利润总额" in t.get("row_labels", []))
+    assert "利润总额" in fin_tbl["row_labels"]
+    sub_tbl = next(t for t in inv["tables"] if t["target"] == "gen_subtotals")
+    assert "巴西" in sub_tbl["subtotal_keys"]
     yr = inv["year_range"]
     assert yr[0] is not None and yr[1] is not None and yr[0] <= yr[1]
 
@@ -170,6 +172,57 @@ def test_propose_unavailable_returns_none(grid_legacy):
             raise RuntimeError("不应调用")
 
     assert SP.propose(grid_legacy, _seed_schema(), client=_NoLLM()) is None
+
+
+# ============================================================ _try_chat 超时重试
+def test_try_chat_retries_on_timeout():
+    """超时(本地 LLM 波动)重试 1 次,第二次成功 → 返回内容,共调 2 次。"""
+    import llm_client
+    calls = []
+
+    class _Timeouty:
+        available = True
+
+        def chat(self, system, user, json_mode=False, timeout=None):
+            calls.append(1)
+            if len(calls) == 1:
+                raise llm_client.LLMUnavailable("LLM API 超时(>240s)")
+            return "yaml: ok"
+
+    assert SP._try_chat(_Timeouty(), "s", "u") == "yaml: ok"
+    assert len(calls) == 2
+
+
+def test_try_chat_no_retry_on_non_timeout_error():
+    """HTTP/格式错误非瞬态 → 不重试,立即返回 None,只调 1 次。"""
+    import llm_client
+    calls = []
+
+    class _HttpErr:
+        available = True
+
+        def chat(self, system, user, json_mode=False, timeout=None):
+            calls.append(1)
+            raise llm_client.LLMUnavailable("LLM API HTTP 401: unauthorized")
+
+    assert SP._try_chat(_HttpErr(), "s", "u") is None
+    assert len(calls) == 1
+
+
+def test_try_chat_all_timeouts_returns_none():
+    """连续超时到重试上限仍失败 → 返回 None。"""
+    import llm_client
+    calls = []
+
+    class _AlwaysTimeout:
+        available = True
+
+        def chat(self, system, user, json_mode=False, timeout=None):
+            calls.append(1)
+            raise llm_client.LLMUnavailable("LLM API 超时(>240s)")
+
+    assert SP._try_chat(_AlwaysTimeout(), "s", "u") is None
+    assert len(calls) == 1 + SP.RETRY_ON_TIMEOUT
 
 
 # ============================================================ prompt 不含数值

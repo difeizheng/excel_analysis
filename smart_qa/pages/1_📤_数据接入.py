@@ -69,16 +69,30 @@ engine = "openpyxl" if path.lower().endswith(".xlsx") else "xlrd"
 xls = pd.ExcelFile(path, engine=engine)
 sheets = list(xls.sheet_names)
 
-# ---- Sheet 清单 + 派发诚实表达 ----
+# ---- Sheet 清单 + 派发诚实表达(动态 · 来自 load_grid.sheet_dispatch)----
+# sheet 清单来自 ExcelFile(展示全部 sheet,含 selectbox 选项);
+# "入 Grid / 进了哪个字段" 取自当前任务 Grid 的 sheet_dispatch,
+# 与 loader.py 派发点是同一份真相,不再靠平行硬编码对账。
 st.subheader("Sheet 清单与 Grid 派发")
+try:
+    _grid = U.get_grid()
+    _dispatch = _grid.sheet_dispatch if _grid is not None else {}
+except Exception:
+    # schema 被 LLM/手改坏时,load_grid 会抛;降级让页面其余部分(清单+骨架)照常
+    _dispatch = {}
+    st.caption("⚠ schema 解析失败,派发信息暂不可用(下方骨架预览仍正常)")
+
 for s in sheets:
-    ok = s in U.SHEET_WHITELIST
-    tag = f"{U.ICON_DET} 入 Grid" if ok else "⚠ 解析但不入 Grid"
-    st.markdown(f"- `{s}` — {tag}")
-if any(s not in U.SHEET_WHITELIST for s in sheets):
+    if s in _dispatch:
+        fields = " · ".join(_dispatch[s])
+        st.markdown(f"- `{s}` — {U.ICON_DET} → {fields}")
+    else:
+        st.markdown(f"- `{s}` — ⚠ 未入 Grid")
+if any(s not in _dispatch for s in sheets):
     st.warning(
-        "非白名单 Sheet(财务数据 / 装机 / 发电量)的数据不会进入查询 Grid。"
-        "这是当前 Grid 派发的已知约束,不演化 Grid 字段。"
+        "未入 Grid 的 Sheet 数据不会进入查询 Grid。"
+        "派发结果由当前任务的 schema 决定(见 loader.sheet_dispatch),"
+        "如需扩字段请走「Schema 编辑」调 table target,不要在 loader 旁路加白名单。"
     )
 
 # ---- 骨架网格预览(类型脱敏)----
@@ -94,7 +108,8 @@ st.subheader("初始化当前任务的 schema")
 col1, col2 = st.columns(2)
 with col1:
     st.markdown(f"#### {U.ICON_DET} 克隆 committed 模板(默认,瞬时)")
-    st.caption("任务创建时已默认克隆 schemas/三峡国际经营数据库.yaml。此处可重置回去。")
+    st.caption("committed 模板是三峡经营数据库的结构。⚠ 若本任务是非三峡格式的 Excel,"
+               "建议改用右侧「LLM 生成 schema」,不要用此模板。")
     if st.button("重置为 committed 模板"):
         TS.update_status(task.id, "构建中")
         with open(U.COMMITTED_SCHEMA, encoding="utf-8") as f:

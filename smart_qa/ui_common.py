@@ -26,7 +26,6 @@ ICON_DET = "⚙"    # 确定性步骤
 # committed 文件:种入示例任务的种子源 + 测试夹具(UI 不再写回)
 COMMITTED_SCHEMA = os.path.join(_ROOT, "schemas", "三峡国际经营数据库.yaml")
 COMMITTED_SEMANTIC_DIR = os.path.join(_ROOT, "semantic")
-SHEET_WHITELIST = ("财务数据", "装机", "发电量")  # 能进 Grid 的 Sheet 名(派发硬编码)
 
 _DATA_ACCESS_PAGE = "pages/1_📤_数据接入.py"
 

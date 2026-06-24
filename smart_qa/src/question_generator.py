@@ -86,25 +86,15 @@ def _years_from_row(row: dict) -> list[int]:
     return sorted(ys)
 
 
-def _subtotal_key(row_label: str) -> str:
-    """复刻 backend._subtotal_region_key:'发电量合计' -> '合计',其余不变。"""
-    return "合计" if row_label == "发电量合计" else row_label
-
-
 def _row_for(grid, metric: str):
-    """按 metric 的 locator 取行字典 {col_key: Cell}(fin/cap/gen_subtotals)。"""
+    """按 metric 的 locator 取行字典 {col_key: Cell}(fin/cap/gen_subtotals)。
+
+    解析下放到 Grid.resolve_locator(loader 侧接缝,统一 _match_row_struct + subtotal 键)。
+    """
     loc = (S.metric_info(metric) or {}).get("locator") or {}
-    sheet = loc.get("sheet")
-    row_label = loc.get("row")
-    if not row_label:
+    if not loc.get("row"):
         return None
-    if sheet == "财务数据":
-        return grid.fin.get(row_label)
-    if sheet == "装机":
-        return grid.cap.get(row_label)
-    if sheet == "发电量":
-        return grid.gen_subtotals.get(_subtotal_key(row_label))
-    return None
+    return grid.resolve_locator(loc)
 
 
 def _cell_value(row, year: int):

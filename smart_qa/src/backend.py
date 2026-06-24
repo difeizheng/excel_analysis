@@ -123,18 +123,12 @@ class MemoryBackend:
         self.close()
 
     def _locate_row(self, metric: str):
-        """复刻 pipeline._row_for_metric:返回行字典 {col_key: Cell} 或 None。"""
+        """复刻 pipeline._row_for_metric:返回行字典 {col_key: Cell} 或 None。
+
+        实际解析下放到 Grid.resolve_locator(loader 侧接缝),本处仅取 locator。
+        """
         loc = S.metric_info(metric).get("locator", {})
-        sheet = loc.get("sheet")
-        if sheet == "财务数据":
-            return _match_row_struct(self.grid.fin, loc.get("row", ""))
-        if sheet == "装机":
-            return _match_row_struct(self.grid.cap, loc.get("row", ""))
-        if sheet == "发电量":
-            if loc.get("row"):                       # 合计/区域小计
-                return self.grid.gen_subtotals.get(_subtotal_region_key(loc["row"]))
-            return None                              # 项目明细走 taxonomy
-        return None
+        return self.grid.resolve_locator(loc)
 
     def lookup(self, metric: str, entity: str, col_key: str):
         row = self._locate_row(metric)
@@ -210,29 +204,25 @@ class MemoryBackend:
 
 
 def _lookup_cell_in_grid(grid, addr: str):
-    """从内存 grid 反查 cell(原 qa._cell_lookup_in_grid 逻辑迁此)。"""
+    """从内存 grid 反查 cell(原 qa._cell_lookup_in_grid 逻辑迁此)。
+
+    经 Grid 的 iter_* 访问器遍历全部容器(row_map/subtotal/detail),
+    按 addr 全局唯一性命中。addr 缺失 "!" 直接返回 None。
+    """
     if not addr or "!" not in addr:
         return None
-    sheet, _ref = addr.split("!", 1)
-    if sheet == "财务数据" and grid.fin:
-        for _label, cells in grid.fin.items():
-            for _ck, cell in cells.items():
-                if cell.addr == addr:
-                    return cell
-    if sheet == "装机" and grid.cap:
-        for _label, cells in grid.cap.items():
-            for _ck, cell in cells.items():
-                if cell.addr == addr:
-                    return cell
-    if sheet == "发电量":
-        for p in grid.gen_projects:
-            for _ck, cell in p["values"].items():
-                if cell.addr == addr:
-                    return cell
-        for _region, cells in grid.gen_subtotals.items():
-            for _ck, cell in cells.items():
-                if cell.addr == addr:
-                    return cell
+    for _src, _label, cells in grid.iter_row_maps():
+        for _ck, cell in cells.items():
+            if cell.addr == addr:
+                return cell
+    for _src, _emit, cells in grid.iter_subtotals():
+        for _ck, cell in cells.items():
+            if cell.addr == addr:
+                return cell
+    for _src, proj in grid.iter_details():
+        for _ck, cell in proj["values"].items():
+            if cell.addr == addr:
+                return cell
     return None
 
 
